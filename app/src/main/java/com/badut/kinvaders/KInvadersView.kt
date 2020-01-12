@@ -465,8 +465,8 @@ class KInvadersView(context: Context, private val size: Point)
             MotionEvent.ACTION_MOVE-> {
                 paused = false
 
-                if (motionEvent.y > size.y - size.y / 8) {
-                    if (motionEvent.x > size.x / 2) {
+                if (motionEvent.y > size.y - size.y / 8) { // lower eighth of screen
+                    if (motionEvent.x > playerShip.position.left) { // to the right of the left edge of player
                         playerShip.moving = PlayerShip.right
                     } else {
                         playerShip.moving = PlayerShip.left
