@@ -14,9 +14,9 @@ class Invader(context: Context, row: Int, column: Int, screenX: Int, screenY: In
 
     var position = RectF(
         column * (width + padding),
-        100 + row * (width + padding / 4), // should this be height?
+        100 + row * (height + padding),
         column * (width + padding) + width,
-        100 + row * (width + padding / 4) + height // should this be height?
+        100 + row * (height + padding) + height
     )
 
     // This will hold the pixels per second speed that the invader will move
