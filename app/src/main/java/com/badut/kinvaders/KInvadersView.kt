@@ -11,6 +11,9 @@ class KInvadersView(context: Context, private val size: Point)
     : SurfaceView(context), // SurfaceView is a View, therefore setContentView can be called on this
     Runnable { // Implements the Runnable interface
 
+    // This variable tracks the game frame rate
+    var fps: Long = 0
+
     // For making a noise
     private val soundPlayer = SoundPlayer(context)
 
@@ -27,35 +30,25 @@ class KInvadersView(context: Context, private val size: Point)
     private var canvas: Canvas = Canvas()
     private val paint: Paint = Paint()
 
+    private var friendlyGameObjs = arrayListOf<GameObject>()
+    private var neutralGameObjs = arrayListOf<GameObject>()
+    private var enemyGameObjs = arrayListOf<GameObject>()
+
+    // Add to this temporary list to avoid concurrent access to enemyGameObjs in update()
+    private var kludgeEnemyBullets = arrayListOf<GameObject>()
+
     // The players ship
-    private var playerShip: PlayerShip = PlayerShip(context, size.x, size.y)
+    private val playerWidth = size.x / 20f
+    private val playerHeight = size.y / 20f
+    var bitmap: Bitmap = BitmapFactory.decodeResource(context.resources, R.drawable.playership)
+    var bitmapScaled = Bitmap.createScaledBitmap(bitmap, playerWidth.toInt(), playerHeight.toInt(),false)
+    val position = RectF(size.x / 2f,size.y.toFloat() - playerHeight,size.x / 2f + playerWidth, size.y.toFloat())
+    private var playerShip: GameObject = GameObject(CombatantMoveComp(size, 500, 20, 450, friendlyGameObjs), PlayerGraphicsComp(bitmapScaled), position)
 
-    // Some Invaders
-    private val invaders = ArrayList<Invader>()
-    private var numInvaders = 0
+    private val ai : IEnemyController = EnemyAI(size, enemyGameObjs, playerShip)
+    private val collision : ICollisionHandler = CollisionAABB(playerShip, friendlyGameObjs, neutralGameObjs, enemyGameObjs)
 
-    // The player's shelters are built from bricks
-    private val bricks = ArrayList<DefenceBrick>()
-    private var numBricks: Int = 0
-
-    // The player's playerBullet
-    // much faster and half the length
-    // compared to invader's bullet
-    private var playerBullet = Bullet(size.y, 1200f, 40f)
-
-    // The invaders bullets
-    private val invadersBullets = ArrayList<Bullet>()
-    private var nextBullet = 0
-    private val maxInvaderBullets = 10
-
-    // The score
-    private var score = 0
-
-    // The wave number
-    private var waves = 1
-
-    // Lives
-    private var lives = 3
+    var gameStatus = GameStatus(0, 3, 1)
 
     // To remember the high score
     private val prefs: SharedPreferences = context.getSharedPreferences(
@@ -64,65 +57,77 @@ class KInvadersView(context: Context, private val size: Point)
 
     private var highScore =  prefs.getInt("highScore", 0)
 
-    // How menacing should the sound be?
-    private var menaceInterval: Long = 1000
-
-    // Which menace sound should play next
-    private var uhOrOh: Boolean = false
-    // When did we last play a menacing sound
-    private var lastMenaceTime = System.currentTimeMillis()
-
-
     // Called every new wave
     private fun prepareLevel() {
+
+        // Add invaders
+        val width = size.x / 25f
+        val height = size.y / 25f
+        val padding = size.x / 60f
+        val topBuffer = size.y / 6f
+
+        var bitmap: Bitmap = BitmapFactory.decodeResource(context.resources, R.drawable.invader1)
+        var bitmapScaled = Bitmap.createScaledBitmap(bitmap, width.toInt(), height.toInt(),false)
+
         // Here we will initialize the game objects
-
-        // Build an army of invaders
-        Invader.numberOfInvaders = 0
-        numInvaders = 0
-        for (column in 0..10) {
-            for (row in 0..5) {
-                invaders.add(Invader(context,
-                    row,
-                    column,
-                    size.x,
-                    size.y))
-
-                numInvaders++
+        for (column in 0..7) {
+            for (row in 0..6) {
+                var position = RectF(
+                    column * (width + padding),
+                    topBuffer + row * (height + padding),
+                    column * (width + padding) + width,
+                    topBuffer + row * (height + padding) + height
+                )
+                var invader = GameObject(CombatantMoveComp(size, 8000, 1000, 150 + gameStatus.wave * 10, kludgeEnemyBullets), PlayerGraphicsComp(bitmapScaled), position)
+                invader.moving = GameObject.right // Invaders start moving to the right
+                enemyGameObjs.add(invader)
             }
         }
 
-        // Build the shelters
-        numBricks = 0
-        for (shelterNumber in 0..4) {
-            for (column in 0..18) {
-                for (row in 0..8) {
-                    bricks.add(DefenceBrick(row,
-                        column,
-                        shelterNumber,
-                        size.x,
-                        size.y))
+        // Add shelters
+        val shelterWidth = size.x / 180f
+        val shelterHeight = size.y / 90f
+        val topOffset = size.y * 13 / 16f
+        val leftOffset = size.x / 4f
 
-                    numBricks++
+        for(shelterNumber in 1..3) {
+            for (column in 0..20) {
+                for (row in 0..10) {
+                    var position = RectF(
+                        shelterNumber * leftOffset + column * shelterWidth,
+                        topOffset + row * shelterHeight,
+                        shelterNumber * leftOffset + column * shelterWidth + shelterWidth,
+                        topOffset + row * shelterHeight + shelterHeight
+                    )
+                    var shelterPiece = GameObject(StationaryMoveComp(), RectGraphicsComp(32, 128, 255), position)
+                    neutralGameObjs.add(shelterPiece)
                 }
             }
         }
 
-        // Initialize the invadersBullets array
-        for (i in 0 until maxInvaderBullets) {
-            invadersBullets.add(Bullet(size.y))
-        }
     }
 
     override fun run() {
-        // This variable tracks the game frame rate
-        var fps: Long = 0
-
         // The game loop
         while (playing) {
 
             // Capture the current time
             val startFrameTime = System.currentTimeMillis()
+
+            if(enemyGameObjs.size == 0) {
+                gameStatus.wave++
+                prepareLevel()
+            }
+
+            if(gameStatus.lives <= 0) {
+                paused = true
+                gameStatus.score = 0
+                gameStatus.lives = 3
+                gameStatus.wave = 1
+                friendlyGameObjs.clear()
+                enemyGameObjs.clear()
+                prepareLevel()
+            }
 
             // Update the frame
             if (!paused) {
@@ -137,219 +142,48 @@ class KInvadersView(context: Context, private val size: Point)
             if (timeThisFrame >= 1) {
                 fps = 1000 / timeThisFrame
             }
-
-            // Play a sound based on the menace level
-            if (!paused && ((startFrameTime - lastMenaceTime) > menaceInterval))
-                menacePlayer()
         }
-    }
-
-    private fun menacePlayer() {
-        if (uhOrOh) {
-            // Play Uh
-            soundPlayer.playSound(SoundPlayer.uhID)
-
-        } else {
-            // Play Oh
-            soundPlayer.playSound(SoundPlayer.ohID)
-        }
-
-        // Reset the last menace time
-        lastMenaceTime = System.currentTimeMillis()
-        // Alter value of uhOrOh
-        uhOrOh = !uhOrOh
-
     }
 
     private fun update(fps: Long) {
         // Update the state of all the game objects
 
+        // Check collisions
+        collision.update(gameStatus)
+
         // Move the player's ship
         playerShip.update(fps)
 
-        // Did an invader bump into the side of the screen
-        var bumped = false
+        // AI decides what enemies do
+        ai.update(gameStatus.wave)
 
-        // Has the player lost
-        var lost = false
-
-        // Update all the invaders if visible
-        for (invader in invaders) {
-
-            if (invader.isVisible) {
-                // Move the next invader
-                invader.update(fps)
-
-                // Does he want to take a shot?
-                if (invader.takeAim(playerShip.position.left,
-                        playerShip.width,
-                        waves)) {
-
-                    // If so try and spawn a bullet
-                    if (invadersBullets[nextBullet].shoot(invader.position.left
-                                + invader.width / 2,
-                            invader.position.top, playerBullet.down)) {
-
-                        // Shot fired
-                        // Prepare for the next shot
-                        nextBullet++
-
-                        // Loop back to the first one if we have reached the last
-                        if (nextBullet == maxInvaderBullets) {
-                            // This stops the firing of bullet
-                            // until one completes its journey
-                            // Because if bullet 0 is still active
-                            // shoot returns false.
-                            nextBullet = 0
-                        }
-                    }
+        // Update friendlies
+        with(friendlyGameObjs.iterator()) {
+            forEach {
+                if (it.removeMe) {
+                    remove()
                 }
-
-                // If that move caused them to bump
-                // the screen change bumped to true
-                if (invader.position.left > size.x - invader.width
-                    || invader.position.left < 0) {
-
-                    bumped = true
-
+                else {
+                    it.update(fps)
                 }
             }
         }
 
-        // Update the players playerBullet if active
-        if (playerBullet.isActive) {
-            playerBullet.update(fps)
-        }
-
-        // Update all the invaders bullets if active
-        for (bullet in invadersBullets) {
-            if (bullet.isActive) {
-                bullet.update(fps)
-            }
-        }
-
-        // Did an invader bump into the edge of the screen
-        if (bumped) {
-
-            // Move all the invaders down and change direction
-            for (invader in invaders) {
-                invader.dropDownAndReverse(waves)
-                // Have the invaders landed
-                if (invader.position.bottom >= size.y && invader.isVisible) {
-                    lost = true;
+        // Update enemies
+        with(enemyGameObjs.iterator()) {
+            forEach {
+                if (it.removeMe) {
+                    remove()
+                }
+                else {
+                    it.update(fps)
                 }
             }
         }
 
-        // Has the player's playerBullet
-        // hit the top of the screen
-        if (playerBullet.position.bottom < 0) {
-            playerBullet.isActive =false
-        }
-
-        // Has an invaders playerBullet
-        // hit the bottom of the screen
-        for (bullet in invadersBullets) {
-            if (bullet.position.top > size.y) {
-                bullet.isActive = false
-            }
-        }
-
-        // Has the player's playerBullet hit an invader
-        if (playerBullet.isActive) {
-            for (invader in invaders) {
-                if (invader.isVisible) {
-                    if (RectF.intersects(playerBullet.position,
-                            invader.position)) {
-                        invader.isVisible = false
-
-                        soundPlayer.playSound(
-                            SoundPlayer.invaderExplodeID)
-
-                        playerBullet.isActive = false
-                        Invader.numberOfInvaders --
-                        score += 10
-                        if(score > highScore){
-                            highScore = score
-                        }
-
-                        // Has the player cleared the level
-                        //if (score == numInvaders * 10 * waves) {
-                        if (Invader.numberOfInvaders == 0) {
-                            paused = true
-                            lives ++
-                            invaders.clear()
-                            bricks.clear()
-                            invadersBullets.clear()
-                            prepareLevel()
-                            waves ++
-                            break
-                        }
-
-                        // Don't check any more invaders
-                        break
-                    }
-                }
-            }
-        }
-
-        // Has an alien playerBullet hit a shelter brick
-        for (bullet in invadersBullets) {
-            if (bullet.isActive) {
-                for (brick in bricks) {
-                    if (brick.isVisible) {
-                        if (RectF.intersects(bullet.position, brick.position)) {
-                            // A collision has occurred
-                            bullet.isActive = false
-                            brick.isVisible = false
-                            soundPlayer.playSound(SoundPlayer.damageShelterID)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Has a player playerBullet hit a shelter brick
-        if (playerBullet.isActive) {
-            for (brick in bricks) {
-                if (brick.isVisible) {
-                    if (RectF.intersects(playerBullet.position, brick.position)) {
-                        // A collision has occurred
-                        playerBullet.isActive = false
-                        brick.isVisible = false
-                        soundPlayer.playSound(SoundPlayer.damageShelterID)
-                    }
-                }
-            }
-        }
-
-        // Has an invader playerBullet hit the player ship
-        for (bullet in invadersBullets) {
-            if (bullet.isActive) {
-                if (RectF.intersects(playerShip.position, bullet.position)) {
-                    bullet.isActive = false
-                    lives --
-                    soundPlayer.playSound(SoundPlayer.playerExplodeID)
-
-                    // Is it game over?
-                    if (lives == 0) {
-                        lost = true
-                        break
-                    }
-                }
-            }
-        }
-
-        if (lost) {
-            paused = true
-            lives = 3
-            score = 0
-            waves = 1
-            invaders.clear()
-            bricks.clear()
-            invadersBullets.clear()
-            prepareLevel()
-        }
+        // Append any new bullets to enemyGameObjs
+        enemyGameObjs.addAll(kludgeEnemyBullets)
+        kludgeEnemyBullets.clear()
     }
 
     private fun draw() {
@@ -364,54 +198,23 @@ class KInvadersView(context: Context, private val size: Point)
             // Choose the brush color for drawing
             paint.color = Color.argb(255, 0, 255, 0)
 
-            // Draw all the game objects here
-            // Now draw the player spaceship
-            canvas.drawBitmap(playerShip.bitmap, playerShip.position.left,
-                playerShip.position.top
-                , paint)
+            playerShip.draw(canvas)
 
-            // Draw the invaders
-            for (invader in invaders) {
-                if (invader.isVisible) {
-                    if (uhOrOh) {
-                        canvas.drawBitmap(Invader.bitmap1!!,  // null negation, because type is Bitmap?
-                            invader.position.left,
-                            invader.position.top,
-                            paint)
-                    } else {
-                        canvas.drawBitmap(Invader.bitmap2!!,  // null negation, because type is Bitmap?
-                            invader.position.left,
-                            invader.position.top,
-                            paint)
-                    }
-                }
-            }
+            for(friend in friendlyGameObjs)
+                friend.draw(canvas)
 
-            // Draw the bricks if visible
-            for (brick in bricks) {
-                if (brick.isVisible) {
-                    canvas.drawRect(brick.position, paint)
-                }
-            }
+            for(enemy in enemyGameObjs)
+                enemy.draw(canvas)
 
-            // Draw the players playerBullet if active
-            if (playerBullet.isActive) {
-                canvas.drawRect(playerBullet.position, paint)
-            }
-
-            // Draw the invaders bullets
-            for (bullet in invadersBullets) {
-                if (bullet.isActive) {
-                    canvas.drawRect(bullet.position, paint)
-                }
-            }
+            for(neutral in neutralGameObjs)
+                neutral.draw(canvas)
 
             // Draw the score and remaining lives
             // Change the brush color
             paint.color = Color.argb(255, 255, 255, 255)
             paint.textSize = 70f
-            canvas.drawText("Score: $score   Lives: $lives Wave: " +
-                    "$waves HI: $highScore", 20f, 75f, paint)
+            val(score, lives, wave) = gameStatus
+            canvas.drawText("Score:$score   Lives:$lives   Wave:$wave   HI:$highScore  FPS:$fps", 20f, 75f, paint)
 
             // Draw everything to the screen
             holder.unlockCanvasAndPost(canvas)
@@ -423,17 +226,14 @@ class KInvadersView(context: Context, private val size: Point)
     fun pause() {
         playing = false
 
-        val prefs = context.getSharedPreferences(
-            "KInvaders",
-            Context.MODE_PRIVATE)
+        val prefs = context.getSharedPreferences("KInvaders", Context.MODE_PRIVATE)
 
         val oldHighScore = prefs.getInt("highScore", 0)
 
         if(highScore > oldHighScore) {
             val editor = prefs.edit()
 
-            editor.putInt(
-                "highScore", highScore)
+            editor.putInt("highScore", highScore)
 
             editor.apply()
         }
@@ -467,22 +267,16 @@ class KInvadersView(context: Context, private val size: Point)
 
                 if (motionEvent.y > size.y - size.y / 8) { // lower eighth of screen
                     if (motionEvent.x > playerShip.position.left) { // to the right of the left edge of player
-                        playerShip.moving = PlayerShip.right
+                        playerShip.moving = GameObject.right
                     } else {
-                        playerShip.moving = PlayerShip.left
+                        playerShip.moving = GameObject.left
                     }
-
+//                    soundPlayer.loopSound(SoundPlayer.playerMoveID, true)
                 }
 
-                if (motionEvent.y < size.y - size.y / 8) {
-                    // Shots fired
-                    if (playerBullet.shoot(
-                            playerShip.position.left + playerShip.width / 2f,
-                            playerShip.position.top,
-                            playerBullet.up)) {
-
-                        soundPlayer.playSound(SoundPlayer.shootID)
-                    }
+                if (motionEvent.y < size.y - size.y / 8 && playerShip.canAction1) {
+                    playerShip.action1 = true
+                    soundPlayer.playSound(SoundPlayer.shootID)
                 }
             }
 
@@ -490,12 +284,12 @@ class KInvadersView(context: Context, private val size: Point)
             MotionEvent.ACTION_POINTER_UP,
             MotionEvent.ACTION_UP -> {
                 if (motionEvent.y > size.y - size.y / 10) {
-                    playerShip.moving = PlayerShip.stopped
+                    playerShip.moving = GameObject.stopped
+//                    soundPlayer.loopSound(SoundPlayer.playerMoveID, false)
                 }
             }
 
         }
         return true
     }
-
 }
